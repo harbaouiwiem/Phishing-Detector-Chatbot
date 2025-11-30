@@ -7,30 +7,54 @@ const PhishingDetector = () => {
   const [messages, setMessages] = useState([
     {
       role: 'assistant',
-      content: " Bonjour ! Je suis votre assistant avancé de détection de phishing alimenté par l'IA.\n\n 🔍 Analyses disponibles : \n• URLs suspectes et raccourcisseurs\n• Langage d'urgence ou menaçant\n• Demandes d'informations sensibles\n• Adresses email non standards\n• Domaines malveillants\n• En-têtes d'email (SPF, DKIM, DMARC)\n• Threat Intelligence (VirusTotal, URLhaus)\n\n 📧 Comment utiliser :\n1. Collez le contenu de l'email\n2. Ou collez les en-têtes complets (Afficher l'original dans Gmail/Outlook)\n3. Décrivez le contenu de votre email"
+      content: " Bonjour ! Je suis votre assistant avancé de détection de phishing alimenté par l'IA.\n\n 🔍 Analyses disponibles : \n• URLs suspectes et raccourcisseurs\n• Langage d'urgence ou menaçant\n• Demandes d'informations sensibles\n• Adresses email non standards\n• Domaines malveillants\n• En-têtes d'email (SPF, DKIM, DMARC)\n• Threat Intelligence (VirusTotal, URLhaus, OpenPhish)\n\n 📧 Comment utiliser :\n1. Collez le contenu de l'email\n2. Ou collez les en-têtes complets (Afficher l'original dans Gmail/Outlook)\n3. Décrivez le contenu de votre email"
     }
   ]);
   const [input, setInput] = useState('');
-  const [isAnalyzing, setIsAnalyzing] = useState(false); // booléen pour désactiver UI pendant l’analyse
+  const [isAnalyzing, setIsAnalyzing] = useState(false); // booléen pour désactiver UI pendant l'analyse
   const [apiKeys, setApiKeys] = useState({
     virustotal: '',
     urlhaus: '' 
   });
   const [showSettings, setShowSettings] = useState(false);
+  const [threatIntelData, setThreatIntelData] = useState(null);
+  const [threatIntelLoading, setThreatIntelLoading] = useState(true);
   const messagesEndRef = useRef(null); // useRef pour scroller vers le bas
 
   const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || 'http://localhost:3001';
 
   const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }); // évite l’erreur si ref null
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }); // évite l'erreur si ref null
   };
+
+  // Charger les données de threat intelligence au montage
+  useEffect(() => {
+    const loadThreatIntel = async () => {
+      try {
+        const response = await fetch(`${BACKEND_URL}/api/threat-intel`);
+        if (response.ok) {
+          const result = await response.json();
+          setThreatIntelData(result.data);
+          console.log('✓ Données threat intel chargées:', result.data.stats);
+        } else {
+          console.error('Erreur lors du chargement threat intel');
+        }
+      } catch (error) {
+        console.error('Erreur connexion backend threat intel:', error);
+      } finally {
+        setThreatIntelLoading(false);
+      }
+    };
+
+    loadThreatIntel();
+  }, [BACKEND_URL]);
 
   useEffect(() => {
     scrollToBottom();
   }, [messages]); // scroller à la fin à chaque nouveau message
 
-  // base de données étendue de domaines malveillants - raccourcisseurs + typo-squats
-  const maliciousDomains = [
+  // Fallback: base de données de domaines malveillants statique (si backend ne répond pas)
+  const defaultMaliciousDomains = [
     'bit.ly', 'tinyurl.com', 'ow.ly', 'goo.gl', 'short.link', 't.co',
     'paypa1.com', 'paypal-secure.com', 'paypal-verify.com',
     'amazon-security.com', 'amazon-update.com', 'amaz0n.com',
@@ -41,8 +65,11 @@ const PhishingDetector = () => {
     'fb-security.com', 'facebook-verify.com', 'instagram-help.net'
   ];
 
-  // mots-clés suspects étendus
-  const suspiciousKeywords = {
+  // Utiliser les données du backend si disponibles, sinon utiliser le fallback
+  const maliciousDomains = threatIntelData?.maliciousDomains || defaultMaliciousDomains;
+
+  // Fallback: mots-clés suspects (si backend ne répond pas)
+  const defaultSuspiciousKeywords = {
     urgence: ['urgent', 'immédiatement', 'dans les 24h', 'dernier avertissement', 
               'action requise', 'dernière chance', 'expiré', 'expire bientôt',
               'maintenant', 'tout de suite', 'sans délai'],
@@ -54,6 +81,9 @@ const PhishingDetector = () => {
     recompense: ['gagné', 'prix', 'gratuit', 'remboursement', 'cadeau', 
                  'offre exclusive', 'promotion', 'récompense', 'bonus']
   };
+
+  // Utiliser les données du backend si disponibles, sinon utiliser le fallback
+  const suspiciousKeywords = threatIntelData?.suspiciousKeywords || defaultSuspiciousKeywords;
 
   // analyse des en-têtes d'email
   const analyzeEmailHeaders = (emailContent) => {
@@ -498,83 +528,17 @@ const PhishingDetector = () => {
             <Shield size={32} color="#667eea" />
             <div>
               <h1 style={{ margin: 0, fontSize: '24px', color: '#333' }}>
-                Détecteur de Phishing IA Avancé
-              </h1>
-              <p style={{ margin: '5px 0 0', fontSize: '14px', color: '#666' }}>
-                SPF/DKIM/DMARC • VirusTotal • URLhaus • Meta Llama 3
-              </p>
+                Détecteur de Phishing Avancé
+              </h1>              
             </div>
           </div>
-          <button
-            onClick={() => setShowSettings(!showSettings)}
-            style={{
-              padding: '10px 20px',
-              background: '#667eea',
-              color: 'white',
-              border: 'none',
-              borderRadius: '8px',
-              cursor: 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '8px',
-              fontSize: '14px'
-            }}
-          >
-            <Database size={18} />
-            {showSettings ? 'Fermer' : 'API Keys'}
-          </button>
         </div>
 
-        {/* Settings Panel */}
-        {showSettings && (
-          <div style={{
-            marginTop: '15px',
-            padding: '15px',
-            background: '#f5f5f5',
-            borderRadius: '10px',
-            border: '2px solid #e0e0e0'
-          }}>
-            <h3 style={{ margin: '0 0 10px', fontSize: '16px', color: '#333' }}>
-              Configuration des APIs Threat Intelligence
-            </h3>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-              <div>
-                <label style={{ fontSize: '14px', color: '#666', display: 'block', marginBottom: '5px' }}>
-                  VirusTotal API Key (optionnel)
-                </label>
-                <input
-                  type="password"
-                  value={apiKeys.virustotal}
-                  onChange={(e) => setApiKeys(prev => ({ ...prev, virustotal: e.target.value }))}
-                  placeholder="Votre clé API VirusTotal"
-                  style={{
-                    width: '100%',
-                    padding: '10px',
-                    border: '1px solid #ddd',
-                    borderRadius: '5px',
-                    fontSize: '14px'
-                  }}
-                />
-                <p style={{ margin: '5px 0 0', fontSize: '12px', color: '#888' }}>
-                  Obtenez une clé gratuite sur virustotal.com (500 requêtes/jour)
-                </p>
-              </div>
-              <div style={{ 
-                padding: '10px', 
-                background: '#e8f5e9', 
-                borderRadius: '5px',
-                fontSize: '13px',
-                color: '#2e7d32'
-              }}>
-                ✓ URLhaus est activé par défaut (aucune clé requise)
-              </div>
-            </div>
-          </div>
-        )}
+        
       </div>
 
       {/* Messages */}
-      <div style={{
+      <div style={{ 
         flex: 1,
         overflowY: 'auto',
         padding: '20px',
@@ -686,7 +650,7 @@ const PhishingDetector = () => {
         color: '#666',
         borderTop: '1px solid #e0e0e0'
       }}>
-        🔒 Analyse en temps réel • Aucune donnée stockée • Propulsé par Meta Llama 3 + VirusTotal + URLhaus
+        🔒 Analyse en temps réel • Aucune donnée stockée • Analyse SPF/DKIM/DMARC • Propulsé par Meta Llama 3 + VirusTotal + URLhaus + OpenPhish
       </div>
     </div>
   );

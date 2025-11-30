@@ -2,3 +2,5 @@ node_modules/
 .env
 *.log
 .DS_Store
+Architecture_sol_sécurisée.txt
+THREAT_INTEL_SETUP.md

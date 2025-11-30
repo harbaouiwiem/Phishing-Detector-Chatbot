@@ -1,0 +1,272 @@
+const fetch = require('node-fetch');
+const fs = require('fs');
+const path = require('path');
+
+const CACHE_DIR = path.join(__dirname, 'cache');
+const CACHE_EXPIRY = 24 * 60 * 60 * 1000; // 24 heures
+
+// Créer le dossier cache s'il n'existe pas
+if (!fs.existsSync(CACHE_DIR)) {
+  fs.mkdirSync(CACHE_DIR, { recursive: true });
+}
+
+const cacheFile = path.join(CACHE_DIR, 'threat-intel.json');
+
+
+ // Charge les données de cache depuis le disque
+
+const loadCache = () => {
+  try {
+    if (fs.existsSync(cacheFile)) {
+      const data = fs.readFileSync(cacheFile, 'utf-8');
+      return JSON.parse(data);
+    }
+  } catch (err) {
+    console.error('Erreur lors du chargement du cache:', err.message);
+  }
+  return null;
+};
+
+
+ // Sauvegarde le cache sur le disque
+ 
+const saveCache = (data) => {
+  try {
+    fs.writeFileSync(cacheFile, JSON.stringify(data, null, 2));
+  } catch (err) {
+    console.error('Erreur lors de la sauvegarde du cache:', err.message);
+  }
+};
+
+
+ // Vérifie si le cache est encore valide
+ 
+const isCacheValid = () => {
+  try {
+    if (!fs.existsSync(cacheFile)) return false;
+    const stats = fs.statSync(cacheFile);
+    const now = Date.now();
+    return (now - stats.mtime.getTime()) < CACHE_EXPIRY;
+  } catch (err) {
+    return false;
+  }
+};
+
+
+ // Récupère les données d'OpenPhish (URLs de phishing)
+
+const fetchOpenPhishData = async () => {
+  try {
+    console.log('[ThreatIntel] Chargement OpenPhish...');
+    const response = await fetch('https://openphish.com/feed.txt', {
+      timeout: 10000
+    });
+    
+    if (!response.ok) {
+      throw new Error(`OpenPhish HTTP ${response.status}`);
+    }
+
+    const text = await response.text();
+    const urls = text
+      .split('\n')
+      .map(url => url.trim())
+      .filter(url => url.length > 0 && (url.startsWith('http://') || url.startsWith('https://')));
+    
+    console.log(`[ThreatIntel] OpenPhish: ${urls.length} URLs chargées`);
+    return urls;
+  } catch (err) {
+    console.error('[ThreatIntel] Erreur OpenPhish:', err.message);
+    return [];
+  }
+};
+
+
+ // Récupère les domaines malveillants depuis URLhaus
+
+const fetchURLhausData = async () => {
+  try {
+    console.log('[ThreatIntel] Chargement URLhaus...');
+    // Utiliser le CSV endpoint au lieu du JSON API (moins restrictif)
+    const response = await fetch('https://urlhaus.abuse.ch/downloads/csv_recent/', {
+      timeout: 10000,
+      headers: {
+        'User-Agent': 'Mozilla/5.0'
+      }
+    });
+    
+    if (!response.ok) {
+      throw new Error(`URLhaus HTTP ${response.status}`);
+    }
+
+    const text = await response.text();
+    const domains = new Set();
+
+    // Parcourir les lignes du CSV
+    const lines = text.split('\n');
+    lines.forEach(line => {
+      if (line.startsWith('"http')) {
+        try {
+          // Format CSV: "url","status","date_added"
+          const match = line.match(/"(https?:\/\/[^"]+)"/);
+          if (match && match[1]) {
+            const url = new URL(match[1]);
+            if (url.hostname) {
+              domains.add(url.hostname);
+            }
+          }
+        } catch (e) {
+          // URL invalide, ignorer
+        }
+      }
+    });
+
+    const domainList = Array.from(domains);
+    console.log(`[ThreatIntel] URLhaus: ${domainList.length} domaines chargés`);
+    return domainList;
+  } catch (err) {
+    console.error('[ThreatIntel] Erreur URLhaus (non-critique):', err.message);
+    // Ne pas lever l'erreur, continuer avec les autres sources
+    return [];
+  }
+};
+
+
+ // Liste étendue de mots-clés suspects (FR + patterns de phishing)
+
+const getExtendedSuspiciousKeywords = () => {
+  return {
+    urgence: [
+      'urgent', 'immédiatement', 'dans les 24h', 'dernier avertissement',
+      'action requise', 'dernière chance', 'expiré', 'expire bientôt',
+      'maintenant', 'tout de suite', 'sans délai', 'rapidement',
+      'asap', 'au plus tôt', 'pressure', 'temps limité', 'offre limitée',
+      'avant que', 'avant de', 'avant le', 'delai court', 'vite'
+    ],
+    menace: [
+      'suspendu', 'bloqué', 'fermé', 'désactivé', 'annulé', 'terminé',
+      'restreint', 'limité', 'verrouillé', 'sanctions', 'pénalités',
+      'avertissement', 'violation', 'non-conformité', 'risque', 'danger',
+      'menace', 'compromis', 'frauduleux', 'illégal', 'problème de sécurité',
+      'compte en danger', 'compte compromis', 'accès non autorisé',
+      'activité suspecte', 'tentative de connexion'
+    ],
+    sensible: [
+      'mot de passe', 'carte bancaire', 'numéro de carte', 'cvv',
+      'code pin', 'sécurité sociale', 'données personnelles', 'identifiant',
+      'code secret', 'vérification', 'authentification', 'coordonnées bancaires',
+      'iban', 'bic', 'compte bancaire', 'identité', 'nip', 'code confidentiel',
+      'information personnelle', 'donnée confidentielle', 'secret',
+      'connexion', 'se connecter', 's\'authentifier', 'confirmer identité',
+      'valider compte', 'vérifier identité', 'crédits', 'paiement'
+    ],
+    recompense: [
+      'gagné', 'prix', 'gratuit', 'remboursement', 'cadeau',
+      'offre exclusive', 'promotion', 'récompense', 'bonus', 'surprise',
+      'jackpot', 'gagnant', 'grand prix', 'tirage au sort', 'concours',
+      'loterie', 'bénéfice', 'avantage', 'deal', 'offre spéciale',
+      'reduction', 'rabais', 'économies', 'c\'est gratuit', 'sans frais'
+    ]
+  };
+};
+
+
+ // Récupère ou met à jour toutes les données de threat intelligence
+ 
+const getThreatIntelData = async (forceRefresh = false) => {
+  // Vérifier le cache
+  if (!forceRefresh && isCacheValid()) {
+    const cachedData = loadCache();
+    if (cachedData) {
+      console.log('[ThreatIntel] Utilisation du cache (valide)');
+      return cachedData;
+    }
+  }
+
+  console.log('[ThreatIntel] Mise à jour des données...');
+
+  const [openphishUrls, urlhausDomains] = await Promise.all([
+    fetchOpenPhishData(),
+    fetchURLhausData()
+  ]);
+
+  // Base de données locale (domaines courants de typo-squats + raccourcisseurs)
+  const localMaliciousDomains = [
+    'bit.ly', 'tinyurl.com', 'ow.ly', 'goo.gl', 'short.link', 't.co',
+    'paypa1.com', 'paypal-secure.com', 'paypal-verify.com', 'paypa1-secure.com',
+    'amazon-security.com', 'amazon-update.com', 'amaz0n.com', 'amazonsecure.net',
+    'netflix-payment.com', 'netfliix.com', 'netflix-billing.com', 'netflix-confirm.com',
+    'microsoft-verify.com', 'micros0ft.com', 'windows-update.net', 'microsoftverify.com',
+    'apple-id-verify.com', 'appleid-secure.com', 'icloud-verify.com', 'apple-secure.net',
+    'secure-banking.net', 'account-verify.net', 'update-account.com', 'verify-account.net',
+    'fb-security.com', 'facebook-verify.com', 'instagram-help.net', 'facebook-login.com',
+    'google-security.com', 'google-verify.com', 'gmail-secure.net', 'accounts-google.com'
+  ];
+
+  // Combiner toutes les listes
+  const allMaliciousDomains = [
+    ...localMaliciousDomains,
+    ...urlhausDomains,
+    ...openphishUrls.map(url => {
+      try {
+        return new URL(url).hostname;
+      } catch {
+        return null;
+      }
+    }).filter(Boolean)
+  ];
+
+  // Dédupliquer
+  const uniqueDomains = Array.from(new Set(allMaliciousDomains));
+
+  const threatIntelData = {
+    maliciousDomains: uniqueDomains,
+    openphishUrls: openphishUrls,
+    suspiciousKeywords: getExtendedSuspiciousKeywords(),
+    lastUpdated: new Date().toISOString(),
+    stats: {
+      totalMaliciousDomains: uniqueDomains.length,
+      openphishUrls: openphishUrls.length,
+      urlhausDomains: urlhausDomains.length,
+      localDomains: localMaliciousDomains.length
+    }
+  };
+
+  // Sauvegarder le cache
+  saveCache(threatIntelData);
+
+  console.log('[ThreatIntel] Données mises à jour:', threatIntelData.stats);
+  return threatIntelData;
+};
+
+
+ // Vérifie si un domaine est malveillant
+
+const isDomainMalicious = async (domain, threatIntelData) => {
+  if (!threatIntelData) {
+    threatIntelData = await getThreatIntelData();
+  }
+
+  const cleanDomain = domain.toLowerCase().trim();
+  
+  // Vérification exacte
+  if (threatIntelData.maliciousDomains.includes(cleanDomain)) {
+    return true;
+  }
+
+  // Vérification si c'est un sous-domaine
+  for (const malicious of threatIntelData.maliciousDomains) {
+    if (cleanDomain.endsWith('.' + malicious) || cleanDomain === malicious) {
+      return true;
+    }
+  }
+
+  return false;
+};
+
+module.exports = {
+  getThreatIntelData,
+  isDomainMalicious,
+  isCacheValid,
+  loadCache,
+  saveCache
+};

@@ -31,3 +31,5 @@ yarn-error.log*
 # Backend
 backend/node_modules/
 backend/.env
+
+GETTING_STARTED.md
