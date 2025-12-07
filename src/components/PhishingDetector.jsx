@@ -1,6 +1,6 @@
 
-import React, { useState, useRef, useEffect } from 'react';
-import { Send, Shield, AlertTriangle, CheckCircle, Mail, Clock, User, Database, Globe, Lock, Info } from 'lucide-react';
+import { useState, useRef, useEffect } from 'react';
+import { Send, Shield } from 'lucide-react';
 
 
 const PhishingDetector = () => {
@@ -11,23 +11,17 @@ const PhishingDetector = () => {
     }
   ]);
   const [input, setInput] = useState('');
-  const [isAnalyzing, setIsAnalyzing] = useState(false); // booléen pour désactiver UI pendant l'analyse
-  const [apiKeys, setApiKeys] = useState({
-    virustotal: '',
-    urlhaus: '' 
-  });
-  const [showSettings, setShowSettings] = useState(false);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [threatIntelData, setThreatIntelData] = useState(null);
-  const [threatIntelLoading, setThreatIntelLoading] = useState(true);
-  const messagesEndRef = useRef(null); // useRef pour scroller vers le bas
+  const messagesEndRef = useRef(null);
 
   const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || 'http://localhost:3001';
 
   const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }); // évite l'erreur si ref null
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
 
-  // Charger les données de threat intelligence au montage
+  // Charger les données de threat intelligence du backend
   useEffect(() => {
     const loadThreatIntel = async () => {
       try {
@@ -35,14 +29,12 @@ const PhishingDetector = () => {
         if (response.ok) {
           const result = await response.json();
           setThreatIntelData(result.data);
-          console.log('✓ Données threat intel chargées:', result.data.stats);
+          console.log('✓ Threat Intel chargées depuis le backend:', result.data.stats);
         } else {
           console.error('Erreur lors du chargement threat intel');
         }
       } catch (error) {
         console.error('Erreur connexion backend threat intel:', error);
-      } finally {
-        setThreatIntelLoading(false);
       }
     };
 
@@ -51,7 +43,8 @@ const PhishingDetector = () => {
 
   useEffect(() => {
     scrollToBottom();
-  }, [messages]); // scroller à la fin à chaque nouveau message
+  }, [messages]);
+
 
   // Fallback: base de données de domaines malveillants statique (si backend ne répond pas)
   const defaultMaliciousDomains = [
@@ -65,10 +58,12 @@ const PhishingDetector = () => {
     'fb-security.com', 'facebook-verify.com', 'instagram-help.net'
   ];
 
-  // Utiliser les données du backend si disponibles, sinon utiliser le fallback
+  // Utiliser les données du backend si disponibles, sinon fallback
   const maliciousDomains = threatIntelData?.maliciousDomains || defaultMaliciousDomains;
+  const maliciousUrls = threatIntelData?.openphishUrls || [];
+  
 
-  // Fallback: mots-clés suspects (si backend ne répond pas)
+  // Mots-clés suspects (pour analyse textuelle - peut rester en dur)
   const defaultSuspiciousKeywords = {
     urgence: ['urgent', 'immédiatement', 'dans les 24h', 'dernier avertissement', 
               'action requise', 'dernière chance', 'expiré', 'expire bientôt',
@@ -82,7 +77,6 @@ const PhishingDetector = () => {
                  'offre exclusive', 'promotion', 'récompense', 'bonus']
   };
 
-  // Utiliser les données du backend si disponibles, sinon utiliser le fallback
   const suspiciousKeywords = threatIntelData?.suspiciousKeywords || defaultSuspiciousKeywords;
 
   // analyse des en-têtes d'email
@@ -164,93 +158,8 @@ const PhishingDetector = () => {
     return headers;
   };
 
-  // analyse avec VirusTotal
-  const checkVirusTotal = async (url) => {
-    if (!apiKeys.virustotal) {
-      return { error: 'Clé API VirusTotal non configurée' };
-    }
-
-    try {
-      // encodage de l'URL en base64 sans padding pour VirusTotal
-      const urlId = btoa(url).replace(/=/g, ''); 
-      
-      const response = await fetch(`https://www.virustotal.com/api/v3/urls/${urlId}`, {
-        headers: {
-          'x-apikey': apiKeys.virustotal
-        }
-      });
-
-      if (response.status === 404) {
-        // URL pas encore scannée, la soumettre
-        const submitResponse = await fetch('https://www.virustotal.com/api/v3/urls', {
-          method: 'POST',
-          headers: {
-            'x-apikey': apiKeys.virustotal,
-            'Content-Type': 'application/x-www-form-urlencoded'
-          },
-          body: `url=${encodeURIComponent(url)}`
-        });
-
-        if (submitResponse.ok) {
-          return { 
-            status: 'submitted', 
-            message: 'URL soumise pour analyse. Réessayez dans 30 secondes.' 
-          };
-        }
-      }
-
-      if (!response.ok) {
-        return { error: `Erreur VirusTotal: ${response.status}` };
-      }
-
-      const data = await response.json();
-      const stats = data.data.attributes.last_analysis_stats;
-      
-      return {
-        malicious: stats.malicious || 0,
-        suspicious: stats.suspicious || 0,
-        harmless: stats.harmless || 0,
-        undetected: stats.undetected || 0,
-        total: stats.malicious + stats.suspicious + stats.harmless + stats.undetected,
-        reputation: data.data.attributes.reputation || 0
-      };
-    } catch (error) {
-      return { error: error.message };
-    }
-  };
-
-  // analyse avec URLhaus
-  const checkURLhaus = async (url) => {
-    try {
-      const response = await fetch('https://urlhaus-api.abuse.ch/v1/url/', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-        },
-        body: `url=${encodeURIComponent(url)}`
-      });
-
-      const data = await response.json();
-      
-      if (data.query_status === 'ok') {
-        return {
-          threat: data.threat || 'unknown',
-          status: data.url_status || 'unknown',
-          tags: data.tags || [],
-          reporter: data.reporter || 'unknown',
-          dateAdded: data.date_added || 'unknown'
-        };
-      } else if (data.query_status === 'no_results') {
-        return { status: 'clean', message: 'URL non répertoriée (probablement sûre)' };
-      }
-      
-      return { error: 'Erreur URLhaus' };
-    } catch (error) {
-      return { error: error.message };
-    }
-  };
-
   const analyzeEmailLocally = (emailContent) => {
+
     const results = {
       urlSuspects: [],
       urgenceDetectee: false,
@@ -266,11 +175,11 @@ const PhishingDetector = () => {
     const lowerContent = emailContent.toLowerCase();
 
     // détecter si ce sont des en-têtes d'email
+
     if (lowerContent.includes('received:') || lowerContent.includes('dkim-signature:') || 
         lowerContent.includes('return-path:')) {
       results.hasHeaders = true;
-      results.headers = analyzeEmailHeaders(emailContent);
-      
+      results.headers = analyzeEmailHeaders(emailContent);      
       // scoring basé sur les en-têtes - local sans IA
       if (results.headers.spf.status === 'fail') results.score += 25;
       if (results.headers.spf.status === 'softfail') results.score += 15;
@@ -280,6 +189,7 @@ const PhishingDetector = () => {
     }
 
     // analyse des URLs
+
     const urlRegex = /(https?:\/\/[^\s]+)/g;
     const urls = emailContent.match(urlRegex) || [];
     
@@ -287,47 +197,82 @@ const PhishingDetector = () => {
     
     urls.forEach(url => {
       const domain = url.split('/')[2];
-      if (maliciousDomains.some(md => domain?.includes(md))) {
+
+      // Vérifier si l'URL complète est dans OpenPhish
+      if (maliciousUrls.includes(url)) {
         results.urlSuspects.push(url);
         results.domainesMalveillants.push(domain);
-        results.score += 30;
+        results.score += 40;
+      }
+      
+      // Vérifier si le domaine est malveillant (URLhaus, OpenPhish extraits)
+      if (maliciousDomains.some(md => domain?.toLowerCase().includes(md.toLowerCase()))) {
+        if (!results.urlSuspects.includes(url)) {
+          results.urlSuspects.push(url);
+        }
+        if (!results.domainesMalveillants.includes(domain)) {
+          results.domainesMalveillants.push(domain);
+        }
+        results.score += 35;
       }
       
       // détection de raccourcisseurs
-      const shorteners = ['bit.ly', 'tinyurl', 'goo.gl', 't.co', 'ow.ly'];
+
+      const shorteners = [ 
+        'bit.ly', 'tinyurl.com', 'goo.gl', 't.co', 'ow.ly', 'buff.ly', 'is.gd', 'cutt.ly',
+        'bit.do', 'mcaf.ee', 'rebrand.ly', 'tiny.cc', 'soo.gd', 'qr.ae', 'v.gd',
+        'shorte.st', 'adf.ly', 't.ly', 'smarturl.it', 'yourls.org', 'trib.al',
+        'rb.gy', 'bl.ink', 's.id', 'lnkd.in', 'snip.ly', 'po.st', 'shorturl.at',
+        'clck.ru', 'cutt.us', 'lc.chat', '1url.com', 'ulvis.net', 'capsulink.com',
+        'hyperurl.co', 'l.wl.co', 'v.ht', 't2m.io', 'git.io', 'gg.gg', 'x.co',
+        'fur.ly', 'ity.im', 'ow.ly', 's7y.us', 'tny.im', 'linktr.ee', 'tinvurl.net'
+      ];
+
       if (shorteners.some(s => domain?.includes(s))) {
         results.score += 20;
       }
       
       // détection d'IP dans l'URL (très suspect)
+
       if (/\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/.test(domain)) {
         results.score += 35;
       }
     });
 
     // analyse du langage d'urgence
+
     if (suspiciousKeywords.urgence.some(k => lowerContent.includes(k))) {
       results.urgenceDetectee = true;
       results.score += 15;
     }
 
     // analyse du langage menaçant
+
     if (suspiciousKeywords.menace.some(k => lowerContent.includes(k))) {
       results.menaceDetectee = true;
       results.score += 20;
     }
 
     // demande d'informations sensibles
+
     if (suspiciousKeywords.sensible.some(k => lowerContent.includes(k))) {
       results.infoSensibleDemandee = true;
       results.score += 25;
     }
 
+    // analyse du langage de récompense
+
+    if (suspiciousKeywords.recompense.some(k => lowerContent.includes(k))) {
+      results.urgenceDetectee = true;
+      results.score += 5;
+    }
+
     // email non standard
+
     const emailRegex = /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi;
     const emails = emailContent.match(emailRegex) || [];
     emails.forEach(email => {
-      if (email.includes('noreply') || email.match(/\d{5,}/) || email.includes('no-reply')) {
+      if (email.includes('noreply') || email.match(/\d{5,}/)) { // adresse avec 'noreply' ou chiffres longs
         results.emailNonStandard = true;
         results.score += 10;
       }
@@ -335,9 +280,9 @@ const PhishingDetector = () => {
 
     return results;
   };
-// le scoring + les flags déduits aident le modèle à avoir un résumé prêt-à-penser sans devoir tout déduire du texte brut.
-// analyse avancée avec l'IA via le backend proxy
-  const analyzeWithAI = async (emailContent, localAnalysis, threatIntelResults) => { 
+
+  // Analyse avancée avec l'IA via le backend proxy
+  const analyzeWithAI = async (emailContent, localAnalysis) => { 
     try {
       const response = await fetch(`${BACKEND_URL}/api/analyze`, {
         method: 'POST',
@@ -345,13 +290,10 @@ const PhishingDetector = () => {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          emailContent: emailContent.substring(0, 2000),
-          localAnalysis,
-          threatIntelResults
+          emailContent: emailContent,
+          localAnalysis
         })
-      });
-
-      if (!response.ok) {
+      });      if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
         throw new Error(errorData.error || `Erreur ${response.status}`);
       }
@@ -368,7 +310,7 @@ const PhishingDetector = () => {
     }
   };
 
-  const formatAnalysisResult = (localAnalysis, aiAnalysis, threatIntelResults) => {
+  const formatAnalysisResult = (localAnalysis, aiAnalysis) => {
     let result = '📊 RÉSULTATS DE L\'ANALYSE AVANCÉE:\n\n';
 
     if (aiAnalysis && !aiAnalysis.error) {
@@ -383,10 +325,10 @@ const PhishingDetector = () => {
 
       result += `💡 Analyse: ${aiAnalysis.explanation || 'Non disponible'}\n\n`;
     } else if (aiAnalysis?.error) {
-    result += `❌ Erreur d'analyse IA: ${aiAnalysis.error}\n\n`;
-  } 
+      result += `❌ Erreur d'analyse IA: ${aiAnalysis.error}\n\n`;
+    }
 
-    // en-têtes d'email
+    // En-têtes d'email
     if (localAnalysis.hasHeaders && localAnalysis.headers) {
       result += `📧 ANALYSE DES EN-TÊTES EMAIL:\n`;
       result += `• SPF: ${localAnalysis.headers.spf.details}\n`;
@@ -394,7 +336,9 @@ const PhishingDetector = () => {
       result += `• DMARC: ${localAnalysis.headers.dmarc.details}\n`;
       
       if (localAnalysis.headers.mismatch) {
-        result += `• ⚠️ ALERTE: Mismatch entre From et Return-Path\n`;
+        result += `• ⚠️ ALERTE: Mismatch entre From et Return-Path:\n`;
+        result += `  From: ${localAnalysis.headers.from}\n`;
+        result += `  Return-Path: ${localAnalysis.headers.returnPath}\n`;
       }
       
       if (localAnalysis.headers.receivedFrom.length > 0) {
@@ -403,47 +347,58 @@ const PhishingDetector = () => {
       result += '\n';
     }
 
-    // Threat Intelligence
-    if (threatIntelResults.virustotal && !threatIntelResults.virustotal.error) {
-      result += `🛡️ VIRUSTOTAL:\n`;
-      if (threatIntelResults.virustotal.status === 'submitted') {
-        result += `• ${threatIntelResults.virustotal.message}\n`;
-      } else {
-        result += `• Détections malveillantes: ${threatIntelResults.virustotal.malicious}/${threatIntelResults.virustotal.total}\n`;
-        result += `• Suspectes: ${threatIntelResults.virustotal.suspicious}\n`;
-        result += `• Réputation: ${threatIntelResults.virustotal.reputation}\n`;
-      }
-      result += '\n';
-    }
-
-    if (threatIntelResults.urlhaus && !threatIntelResults.urlhaus.error) {
-      result += `🌐 URLHAUS:\n`;
-      if (threatIntelResults.urlhaus.status === 'clean') {
-        result += `• ${threatIntelResults.urlhaus.message}\n`;
-      } else {
-        result += `• Statut: ${threatIntelResults.urlhaus.status}\n`;
-        result += `• Type de menace: ${threatIntelResults.urlhaus.threat}\n`;
-        if (threatIntelResults.urlhaus.tags?.length > 0) {
-          result += `• Tags: ${threatIntelResults.urlhaus.tags.join(', ')}\n`;
-        }
-      }
-      result += '\n';
-    }
-
     result += `📋 DÉTAILS TECHNIQUES:\n`;
-    result += `• Score de risque: ${Math.min(localAnalysis.score, 100)}/100\n`;
+    result += `• Score de risque calculé: ${Math.min(localAnalysis.score, 100)}/100\n`;
     if (localAnalysis.extractedUrls?.length > 0) {
-      result += `• URLs trouvées: ${localAnalysis.extractedUrls.length}\n`;
+      result += `• URLs trouvées: ${localAnalysis.extractedUrls}\n`;
     }
     if (localAnalysis.urlSuspects.length > 0) {
-      result += `• URLs suspectes: ${localAnalysis.urlSuspects.length}\n`;
+      result += `• URLs suspectes detectés: ${localAnalysis.urlSuspects}\n`;
     }
     if (localAnalysis.domainesMalveillants.length > 0) {
-      result += `• Domaines malveillants: ${localAnalysis.domainesMalveillants.join(', ')}\n`;
+      result += `• Domaines malveillants detectés: ${localAnalysis.domainesMalveillants.join(', ')}\n`;
     }
     if (localAnalysis.urgenceDetectee) result += `• ⚠️ Langage d'urgence détecté\n`;
     if (localAnalysis.menaceDetectee) result += `• ⚠️ Langage menaçant détecté\n`;
     if (localAnalysis.infoSensibleDemandee) result += `• 🔒 Demande d'informations sensibles\n`;
+    if (localAnalysis.emailNonStandard) result += `• 📧 Adresse email non-standard détectée\n`;
+
+      
+      if (aiAnalysis?.threatIntel) {
+        result += `\n🛡️ THREAT INTELLIGENCE:\n`;
+      
+        // OpenPhish
+        if (aiAnalysis.threatIntel.openphish) {
+          result += `📌 OpenPhish (Phishing URLs Database):\n`;
+          result += `  • Statut: ${aiAnalysis.threatIntel.openphish.status === 'detected' ? '🚨 DÉTECTÉ' : '✓ Non détecté'}\n`;
+          result += `  • ${aiAnalysis.threatIntel.openphish.message}\n`;
+        }
+      
+        // URLhaus
+        if (aiAnalysis.threatIntel.urlhaus) {
+          result += `🌐 URLhaus (Malicious URLs):\n`;
+          result += `  • Statut: ${aiAnalysis.threatIntel.urlhaus.status === 'malicious' ? '🚨 MALVEILLANT' : '✓ Propre'}\n`;
+          result += `  • ${aiAnalysis.threatIntel.urlhaus.message}\n`;
+        }
+      
+        // VirusTotal
+        if (aiAnalysis.threatIntel.virustotal) {
+          result += `🔬 VirusTotal (URL Reputation):\n`;
+          const vt = aiAnalysis.threatIntel.virustotal;
+          if (vt.error) {
+            result += `  • Erreur: ${vt.error}\n`;
+          } else if (vt.status === 'submitted') {
+            result += `  • ⏳ ${vt.message}\n`;
+          } else {
+            result += `  • Détections malveillantes: ${vt.malicious || 0}/${vt.total || 0}\n`;
+            result += `  • Détections suspectes: ${vt.suspicious || 0}\n`;
+            result += `  • Détections inoffensives: ${vt.harmless || 0}\n`;
+            result += `  • Non détectées: ${vt.undetected || 0}\n`;
+            result += `  • Réputation: ${vt.reputation || 0}\n`;
+          }
+        }
+        result += '\n';
+      }
 
     if (aiAnalysis?.recommendations?.length > 0) {
       result += `\n🛡️ RECOMMANDATIONS:\n`;
@@ -452,55 +407,39 @@ const PhishingDetector = () => {
 
     return result;
   };
+
   // soumission de l'analyse
+
   const handleSubmit = async (e) => {
     e?.preventDefault();
-    if (!input.trim() || isAnalyzing) return; // éviter les soumissions vides ou multiples
+    if (!input.trim() || isAnalyzing) return;
 
     const userMessage = { role: 'user', content: input };
-    setMessages(prev => [...prev, userMessage]); // ajouter le message utilisateur
+    setMessages(prev => [...prev, userMessage]);
     setInput('');
     setIsAnalyzing(true);
 
-    // analyse locale
+    // Analyse locale
     const localAnalysis = analyzeEmailLocally(input);
 
-    // message de progression
+    // Message de progression
     setMessages(prev => [...prev, {
       role: 'assistant',
       content: '🔍 ANALYSE EN COURS...\n\n✓ Scan des URLs et domaines\n✓ Détection des patterns suspects\n' + 
                (localAnalysis.hasHeaders ? '✓ Analyse des en-têtes (SPF/DKIM/DMARC)\n' : '') +
-               (localAnalysis.extractedUrls?.length > 0 ? '⏳ Consultation Threat Intelligence...\n' : '') +
+               (localAnalysis.extractedUrls?.length > 0 ? '✓ Consultation Threat Intelligence (OpenPhish/URLhaus/VirusTotal)\n' : '') +
                '⏳ Consultation de l\'IA avancée...'
     }]);
 
-    // Threat Intelligence sur les URLs
-    const threatIntelResults = {
-      virustotal: null,
-      urlhaus: null
-    };
+    // Analyse IA (backend enrichit automatiquement avec threat intel)
+    const aiAnalysis = await analyzeWithAI(input, localAnalysis);
 
-    if (localAnalysis.extractedUrls?.length > 0) {
-      const firstUrl = localAnalysis.extractedUrls[0];
-      
-      // virusTotal (si la clé API configurée)
-      if (apiKeys.virustotal) {
-        threatIntelResults.virustotal = await checkVirusTotal(firstUrl);
-      }
-      
-      // URLhaus (toujours disponible)
-      threatIntelResults.urlhaus = await checkURLhaus(firstUrl);
-    }
-
-    // analyse IA
-    const aiAnalysis = await analyzeWithAI(input, localAnalysis, threatIntelResults);
-
-    // résultats finaux
+    // Résultats finaux
     setMessages(prev => {
       const newMessages = [...prev];
       newMessages[newMessages.length - 1] = {
         role: 'assistant',
-        content: formatAnalysisResult(localAnalysis, aiAnalysis, threatIntelResults)
+        content: formatAnalysisResult(localAnalysis, aiAnalysis)
       };
       return newMessages;
     });

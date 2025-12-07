@@ -6,6 +6,7 @@ const CACHE_DIR = path.join(__dirname, 'cache');
 const CACHE_EXPIRY = 24 * 60 * 60 * 1000; // 24 heures
 
 // Créer le dossier cache s'il n'existe pas
+
 if (!fs.existsSync(CACHE_DIR)) {
   fs.mkdirSync(CACHE_DIR, { recursive: true });
 }
@@ -13,7 +14,7 @@ if (!fs.existsSync(CACHE_DIR)) {
 const cacheFile = path.join(CACHE_DIR, 'threat-intel.json');
 
 
- // Charge les données de cache depuis le disque
+// Charge les données de cache depuis le disque
 
 const loadCache = () => {
   try {
@@ -28,7 +29,7 @@ const loadCache = () => {
 };
 
 
- // Sauvegarde le cache sur le disque
+// Sauvegarde le cache sur le disque
  
 const saveCache = (data) => {
   try {
@@ -39,7 +40,7 @@ const saveCache = (data) => {
 };
 
 
- // Vérifie si le cache est encore valide
+// Vérifie si le cache est encore valide
  
 const isCacheValid = () => {
   try {
@@ -53,11 +54,11 @@ const isCacheValid = () => {
 };
 
 
- // Récupère les données d'OpenPhish (URLs de phishing)
+// Récupère les URLs de phishing d'OpenPhish)
 
 const fetchOpenPhishData = async () => {
   try {
-    console.log('[ThreatIntel] Chargement OpenPhish...');
+    console.log('Chargement des URLs depuis OpenPhish...');
     const response = await fetch('https://openphish.com/feed.txt', {
       timeout: 10000
     });
@@ -72,16 +73,16 @@ const fetchOpenPhishData = async () => {
       .map(url => url.trim())
       .filter(url => url.length > 0 && (url.startsWith('http://') || url.startsWith('https://')));
     
-    console.log(`[ThreatIntel] OpenPhish: ${urls.length} URLs chargées`);
+    console.log(`Chargement des URLs depuis OpenPhish: ${urls.length} URLs chargées`);
     return urls;
   } catch (err) {
-    console.error('[ThreatIntel] Erreur OpenPhish:', err.message);
+    console.error('Erreur OpenPhish:', err.message);
     return [];
   }
 };
 
 
- // Récupère les domaines malveillants depuis URLhaus
+// Récupère les domaines malveillants depuis URLhaus
 
 const fetchURLhausData = async () => {
   try {
@@ -121,17 +122,70 @@ const fetchURLhausData = async () => {
     });
 
     const domainList = Array.from(domains);
-    console.log(`[ThreatIntel] URLhaus: ${domainList.length} domaines chargés`);
+    console.log(`Chargement des domaines depuis URLhaus: ${domainList.length} domaines chargés`);
     return domainList;
   } catch (err) {
-    console.error('[ThreatIntel] Erreur URLhaus (non-critique):', err.message);
-    // Ne pas lever l'erreur, continuer avec les autres sources
-    return [];
+    console.error('Erreur URLhaus:', err.message);    
+    return []; // Ne pas lever l'erreur, continuer avec les autres sources
   }
 };
 
+// Enrichissement et vérification avec VirusTotal
 
- // Liste étendue de mots-clés suspects (FR + patterns de phishing)
+const checkVirusTotal = async (url) => {
+  if (!process.env.VIRUSTOTAL_API_KEY) {
+    return { error: 'Clé API VirusTotal non configurée' };
+  }
+
+  try {
+    const urlID = Buffer.from(url).toString('base64').replace(/=/g, '');
+    const response = await fetch(`https://www.virustotal.com/api/v3/urls/${urlID}`, {
+      headers: {
+        'x-apikey': process.env.VIRUSTOTAL_API_KEY
+      },
+      timeout: 10000
+    });
+
+    if (response.status === 404) {
+      // URL non encore analysée : soumettre pour analyse
+      const submitResponse = await fetch('https://www.virustotal.com/api/v3/urls', {
+        method: 'POST',
+        headers: {
+          'x-apikey': process.env.VIRUSTOTAL_API_KEY,
+          'Content-Type': 'application/x-www-form-urlencoded'
+        },
+        body: `url=${encodeURIComponent(url)}`,
+        timeout: 10000
+      });
+
+      if (submitResponse.ok) {
+        return { status: 'submitted', message: 'URL soumise pour analyse. Réessayez dans 30 secondes.' };
+      }
+    }
+
+    if (!response.ok) {
+      return { error: `VirusTotal HTTP ${response.status}` };
+    }
+
+    const data = await response.json();
+    const stats = data.data.attributes.last_analysis_stats || {};
+
+    return {
+      malicious: stats.malicious || 0,
+      suspicious: stats.suspicious || 0,
+      harmless: stats.harmless || 0,
+      undetected: stats.undetected || 0,
+      total: (stats.malicious || 0) + (stats.suspicious || 0) + (stats.harmless || 0) + (stats.undetected || 0),
+      reputation: data.data.attributes.reputation || 0
+    };
+
+  } catch (err) {
+    console.error('[ThreatIntel] VirusTotal error:', err.message || err);
+    return { error: err.message || String(err) };
+  }
+};
+
+// Liste étendue de mots-clés suspects (en francais + patterns de phishing)
 
 const getExtendedSuspiciousKeywords = () => {
   return {
@@ -170,19 +224,21 @@ const getExtendedSuspiciousKeywords = () => {
 };
 
 
- // Récupère ou met à jour toutes les données de threat intelligence
+// Récupère ou met à jour toutes les données de threat intelligence de URLhaus et OpenPhish
  
 const getThreatIntelData = async (forceRefresh = false) => {
+
   // Vérifier le cache
+
   if (!forceRefresh && isCacheValid()) {
     const cachedData = loadCache();
     if (cachedData) {
-      console.log('[ThreatIntel] Utilisation du cache (valide)');
+      console.log('Utilisation du cache valide');
       return cachedData;
     }
   }
 
-  console.log('[ThreatIntel] Mise à jour des données...');
+  console.log('Mise à jour des données...');
 
   const [openphishUrls, urlhausDomains] = await Promise.all([
     fetchOpenPhishData(),
@@ -190,6 +246,7 @@ const getThreatIntelData = async (forceRefresh = false) => {
   ]);
 
   // Base de données locale (domaines courants de typo-squats + raccourcisseurs)
+
   const localMaliciousDomains = [
     'bit.ly', 'tinyurl.com', 'ow.ly', 'goo.gl', 'short.link', 't.co',
     'paypa1.com', 'paypal-secure.com', 'paypal-verify.com', 'paypa1-secure.com',
@@ -202,7 +259,8 @@ const getThreatIntelData = async (forceRefresh = false) => {
     'google-security.com', 'google-verify.com', 'gmail-secure.net', 'accounts-google.com'
   ];
 
-  // Combiner toutes les listes
+  // Combiner toutes les listes de domaines malveillants
+
   const allMaliciousDomains = [
     ...localMaliciousDomains,
     ...urlhausDomains,
@@ -215,8 +273,9 @@ const getThreatIntelData = async (forceRefresh = false) => {
     }).filter(Boolean)
   ];
 
-  // Dédupliquer
-  const uniqueDomains = Array.from(new Set(allMaliciousDomains));
+  
+  const uniqueDomains = Array.from(new Set(allMaliciousDomains)); // Dédupliquer la liste des domaines
+
 
   const threatIntelData = {
     maliciousDomains: uniqueDomains,
@@ -231,15 +290,15 @@ const getThreatIntelData = async (forceRefresh = false) => {
     }
   };
 
-  // Sauvegarder le cache
+  // Sauvegarder le cache les nouvelles données de threat intel
   saveCache(threatIntelData);
 
-  console.log('[ThreatIntel] Données mises à jour:', threatIntelData.stats);
+  console.log('Données ThreatIntel mises à jour:', threatIntelData.stats);
   return threatIntelData;
 };
 
 
- // Vérifie si un domaine est malveillant
+// Vérifie si un domaine est malveillant
 
 const isDomainMalicious = async (domain, threatIntelData) => {
   if (!threatIntelData) {
@@ -255,7 +314,7 @@ const isDomainMalicious = async (domain, threatIntelData) => {
 
   // Vérification si c'est un sous-domaine
   for (const malicious of threatIntelData.maliciousDomains) {
-    if (cleanDomain.endsWith('.' + malicious) || cleanDomain === malicious) {
+    if (cleanDomain.endsWith('.' + malicious) || cleanDomain === malicious) { 
       return true;
     }
   }
@@ -268,5 +327,6 @@ module.exports = {
   isDomainMalicious,
   isCacheValid,
   loadCache,
-  saveCache
+  saveCache,
+  checkVirusTotal
 };

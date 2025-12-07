@@ -2,7 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
-const { getThreatIntelData, isDomainMalicious, isCacheValid } = require('./threatIntelCache');
+const { getThreatIntelData, isDomainMalicious, isCacheValid, checkVirusTotal } = require('./threatIntelCache');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -17,8 +17,8 @@ app.use(express.json({ limit: '10mb' }));
 
 // Rate limiting
 const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 100,
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // limite de chaque IP à 100 requêtes par windowMs
   message: { error: 'Trop de requêtes, veuillez réessayer plus tard.' }
 });
 
@@ -27,59 +27,8 @@ app.use('/api/', limiter);
 // Health check
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString(), 
-  virustotal: {configured: !!process.env.VIRUSTOTAL_API_KEY}});
+    threatIntelCacheLoaded: threatIntelCache !== null});
 });
-
-// focntion pour vérifier VirusTotal côté backend
-async function checkVirusTotalBackend(url) {
-  if (!process.env.VIRUSTOTAL_API_KEY) {
-    throw new Error('Clé API VirusTotal non configurée');
-  }
-
- try {
-    // encoder l'URL en base64 sans padding
-    const urlID = Buffer.from(url).toString('base64').replace(/=/g, '');
-    const response = await fetch(`https://www.virustotal.com/api/v3/urls/${urlID}`, {
-      headers: {
-        'x-apikey': process.env.VIRUSTOTAL_API_KEY
-      },
-      timeout: 10000
-    });
-
-    if (response.status === 404) {
-      // url pas encore scanéée, la soumettre pour analyse
-      const submitResponse = await fetch('https://www.virustotal.com/api/v3/urls', {
-        method: 'POST',
-        headers: {
-          'x-apikey': process.env.VIRUSTOTAL_API_KEY,
-          'Content-Type': 'application/x-www-form-urlencoded'
-        },
-        body: `url=${encodeURIComponent(url)}`,
-        timeout: 10000
-      });
-      
-      if (submitResponse.ok) {
-        return { status: 'submitted', message: 'URL soumise pour analyse. Réessayez dans 30 secondes.' };
-    }
-   }
-    if (!response.ok) {
-      return { Error:`VirusTotal HTTP ${response.status}`};
-    }
-
-    const data = await response.json();
-    const stats = data.data.attributes.last_analysis_stats;
-
-    return {
-      malicious: stats.malicious || 0,
-      suspicious: stats.suspicious || 0,
-      harmless: stats.harmless || 0,
-      undetected: stats.undetected || 0,
-      total: stats.malicious + stats.suspicious + stats.harmless + stats.undetected,
-      reputation: data.data.attributes.reputation || 0
-    };
-  } catch (error) {console.error('VirusTotal error:', error);
-    return { error: error.message };}
-}
 
 // Route pour récupérer les données de threat intelligence
 app.get('/api/threat-intel', async (req, res) => {
@@ -89,7 +38,7 @@ app.get('/api/threat-intel', async (req, res) => {
     if (!threatIntelCache || forceRefresh) {
       threatIntelCache = await getThreatIntelData(forceRefresh);
     }
-
+    // Envoyer les données de threat intelligence au frontend: malicious domains depuis URLhaus et OpenPhish et urls OpenPhish
     res.json({
       status: 'ok',
       data: {
@@ -160,10 +109,10 @@ app.post('/api/threat-intel/refresh', async (req, res) => {
 });
 
 
-// Endpoint proxy pour Groq API
+// Endpoint proxy pour Groq API avec enrichissement Threat Intelligence centralisé
 app.post('/api/analyze', async (req, res) => {
   try {
-    const { emailContent, localAnalysis, threatIntelResults } = req.body;
+    const { emailContent, localAnalysis } = req.body;
 
     if (!emailContent || emailContent.trim().length === 0) {
       return res.status(400).json({ error: 'Contenu email manquant' });
@@ -173,15 +122,61 @@ app.post('/api/analyze', async (req, res) => {
       return res.status(400).json({ error: 'Contenu trop long (max 50KB)' });
     }
 
-   // enrichier avec VirusTotal côté backend
-   if (localAnalysis.extractedUrls?.length > 0 && process.env.VIRUSTOTAL_API_KEY) {
+    // Charger le cache threat intel si nécessaire
+    if (!threatIntelCache) {
+      threatIntelCache = await getThreatIntelData();
+    }
+
+    // === Enrichissement Threat Intelligence côté backend ===
+    const threatIntelResults = {
+      virustotal: null,
+      urlhaus: null,
+      openphish: null
+    };
+
+
+    if (localAnalysis.extractedUrls?.length > 0) {
       const firstUrl = localAnalysis.extractedUrls[0];
-      try {
-        threatIntelResults.virustotal = await checkVirusTotalBackend(firstUrl);
-      } catch (error) {
-        console.error('⚠️ VirusTotal error (continuant sans):', error.message);
-        threatIntelResults.virustotal = { error: 'Service indisponible' };
+      
+      // Vérifier si URL est dans OpenPhish
+      if (threatIntelCache.openphishUrls?.includes(firstUrl)) {
+        threatIntelResults.openphish = { 
+          status: 'detected',
+          message: 'URL détectée dans OpenPhish (base de phishing)'
+        };
+      } else {
+        threatIntelResults.openphish = { 
+          status: 'clean',
+          message: 'URL non trouvée dans OpenPhish'
+        };
+      }
+
+      // Vérifier domaine avec isDomainMalicious (URLhaus + local)
+      const domain = firstUrl.split('/')[2];
+      if (domain) {
+        const isMalicious = await isDomainMalicious(domain, threatIntelCache);
+        if (isMalicious) {
+          threatIntelResults.urlhaus = {
+            status: 'malicious',
+            message: 'Domaine détecté comme malveillant (URLhaus/OpenPhish)'
+          };
+        } else {
+          threatIntelResults.urlhaus = {
+            status: 'clean',
+            message: 'Domaine non malveillant'
+          };
         }
+      } 
+
+      // Enrichir avec VirusTotal (réputation)
+      if (process.env.VIRUSTOTAL_API_KEY) {
+        try {
+          threatIntelResults.virustotal = await checkVirusTotal(firstUrl);
+        } catch (error) {
+          console.error('⚠️ VirusTotal error:', error.message || error);
+          threatIntelResults.virustotal = { error: 'Service indisponible' };
+        }
+      }
     }
 
     const prompt = `Tu es un expert en cybersécurité spécialisé dans la détection de phishing. Analyse cet email avec toutes les données disponibles et fournis une réponse en JSON strict.
@@ -190,12 +185,15 @@ Email à analyser:
 ${emailContent.substring(0, 2000)} 
 
 Analyse préliminaire:
-- URLs extraites: ${localAnalysis.extractedUrls?.length || 0}
-- URLs suspectes: ${localAnalysis.urlSuspects?.length || 0}
+- Nombre d'URLs extraites: ${localAnalysis.extractedUrls?.length || 0}
+- URLs extraites: ${localAnalysis.extractedUrls || 'aucun'}
+- Nombre d'URLs suspectes: ${localAnalysis.urlSuspects?.length || 0}
+- URLs suspectes: ${localAnalysis.urlSuspects || 'aucun'}
 - Domaines malveillants: ${localAnalysis.domainesMalveillants?.join(', ') || 'aucun'}
 - Urgence: ${localAnalysis.urgenceDetectee}
 - Menaces: ${localAnalysis.menaceDetectee}
 - Infos sensibles: ${localAnalysis.infoSensibleDemandee}
+- language de récompense: ${localAnalysis.languageRecompenseDetectee}
 - Score local: ${localAnalysis.score}/100
 
 ${localAnalysis.hasHeaders ? `
@@ -206,17 +204,21 @@ En-têtes email:
 - Mismatch From/Return-Path: ${localAnalysis.headers.mismatch}
 ` : ''}
 
-${threatIntelResults.virustotal ? `
-VirusTotal:
-- Détections malveillantes: ${threatIntelResults.virustotal.malicious}/${threatIntelResults.virustotal.total}
-- Suspectes: ${threatIntelResults.virustotal.suspicious}
-- Réputation: ${threatIntelResults.virustotal.reputation}
+${threatIntelResults.openphish ? `
+OpenPhish:
+- URL détectée: ${threatIntelResults.openphish.message}
 ` : ''}
 
 ${threatIntelResults.urlhaus ? `
 URLhaus:
-- Statut: ${threatIntelResults.urlhaus.status}
-- Menace: ${threatIntelResults.urlhaus.threat || 'N/A'}
+- Domaine malveillant: ${threatIntelResults.urlhaus.message}
+` : ''}
+
+${threatIntelResults.virustotal && !threatIntelResults.virustotal.error ? `
+VirusTotal:
+- Détections malveillantes: ${threatIntelResults.virustotal.malicious || 0}/${threatIntelResults.virustotal.total || 0}
+- Suspectes: ${threatIntelResults.virustotal.suspicious || 0}
+- Réputation: ${threatIntelResults.virustotal.reputation || 0}
 ` : ''}
 
 Ta mission est d'analyser cet email en profendeur en utilisant TOUS les élèments ci-dessus et de fournir UNIQUEMENT un objet JSON avec cette structure exacte:
@@ -225,7 +227,12 @@ Ta mission est d'analyser cet email en profendeur en utilisant TOUS les élèmen
   "confidence": 0-100,
   "risks": ["risque1", "risque2"],
   "explanation": "explication détaillée avec la meme langue que l'email",
-  "recommendations": ["conseil1", "conseil2"]
+  "recommendations": ["conseil1", "conseil2"],
+  "threatIntel": {
+    "openphish": { "status": "detected/clean", "message": "..." },
+    "urlhaus": { "status": "malicious/clean", "message": "..." },
+    "virustotal": { "malicious": X, "suspicious": Y, "reputation": Z, "total": W }
+  }
 }`;
 
     const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
@@ -239,7 +246,7 @@ Ta mission est d'analyser cet email en profendeur en utilisant TOUS les élèmen
         messages: [
           {
             role: 'system',
-            content: 'Tu es un expert en cybersécurité. Réponds toujours en JSON valide sans markdown.'
+            content: 'Tu es un expert en cybersécurité spécialisé dans la détection et analyse des emails de Phishing. Réponds toujours en JSON valide sans markdown.'
           },
           {
             role: 'user',
@@ -289,13 +296,13 @@ app.use((req, res) => {
 });
 
 app.listen(PORT, async () => {
-  console.log(`🚀 Serveur proxy démarré sur le port ${PORT}`);
-  console.log(`📡 Frontend autorisé: ${process.env.FRONTEND_URL || 'http://localhost:3000'}`);
-  console.log(`🔑 Groq API Key configurée: ${process.env.GROQ_API_KEY ? '✓' : '✗'}`);
+  console.log(` Serveur proxy démarré sur le port ${PORT}`);
+  console.log(` Frontend autorisé: ${process.env.FRONTEND_URL || 'http://localhost:3000'}`);
+  console.log(` Groq API Key configurée: ${process.env.GROQ_API_KEY ? '✓' : '✗'}`);
   
   // Charger les données de threat intelligence au démarrage
   try {
-    console.log('📦 Chargement des données de threat intelligence...');
+    console.log(' Chargement des données de threat intelligence...');
     threatIntelCache = await getThreatIntelData();
     console.log('✓ Threat intel chargé avec succès');
   } catch (error) {
